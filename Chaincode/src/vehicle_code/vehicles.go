@@ -531,7 +531,7 @@ func (t *SimpleChaincode) get_loans(stub shim.ChaincodeStubInterface, caller str
 
 		if err != nil {return nil, errors.New("Failed to retrieve V5C")}
 
-		temp, err = t.get_loan_details(stub, v, caller, caller_affiliation)
+		temp, err = t.get_loan_details(stub, v/*, caller, caller_affiliation*/)
 
 		if err == nil {
 			result += string(temp) + ","
