@@ -509,7 +509,7 @@ func (t *SimpleChaincode) get_loan_details(stub shim.ChaincodeStubInterface, v l
 //	 get_loans
 //=================================================================================================================================
 
-func (t *SimpleChaincode) get_loans(stub shim.ChaincodeStubInterface, caller string/*, caller_affiliation string*/) ([]byte, error) {
+func (t *SimpleChaincode) get_loans(stub shim.ChaincodeStubInterface/*, caller string, caller_affiliation string*/) ([]byte, error) {
 	bytes, err := stub.GetState("v5cIDs")
 
 																			if err != nil { return nil, errors.New("Unable to get v5cIDs") }
