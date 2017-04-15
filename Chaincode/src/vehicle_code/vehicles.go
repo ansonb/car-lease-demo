@@ -488,7 +488,7 @@ func (t *SimpleChaincode) update_participatingBank(stub shim.ChaincodeStubInterf
 //=================================================================================================================================
 //	 get_loan_details
 //=================================================================================================================================
-func (t *SimpleChaincode) get_loan_details(stub shim.ChaincodeStubInterface, v loan, caller string, caller_affiliation string) ([]byte, error) {
+func (t *SimpleChaincode) get_loan_details(stub shim.ChaincodeStubInterface, v loan/*, caller string, caller_affiliation string*/) ([]byte, error) {
 
 	bytes, err := json.Marshal(v)
 
@@ -509,7 +509,7 @@ func (t *SimpleChaincode) get_loan_details(stub shim.ChaincodeStubInterface, v l
 //	 get_loans
 //=================================================================================================================================
 
-func (t *SimpleChaincode) get_loans(stub shim.ChaincodeStubInterface, caller string, caller_affiliation string) ([]byte, error) {
+func (t *SimpleChaincode) get_loans(stub shim.ChaincodeStubInterface, caller string/*, caller_affiliation string*/) ([]byte, error) {
 	bytes, err := stub.GetState("v5cIDs")
 
 																			if err != nil { return nil, errors.New("Unable to get v5cIDs") }
@@ -562,7 +562,7 @@ func (t *SimpleChaincode) get_ecert(stub shim.ChaincodeStubInterface, name strin
 //=================================================================================================================================
 //	 check_unique_v5c
 //=================================================================================================================================
-func (t *SimpleChaincode) check_unique_v5c(stub shim.ChaincodeStubInterface, v5c string, caller string, caller_affiliation string) ([]byte, error) {
+func (t *SimpleChaincode) check_unique_v5c(stub shim.ChaincodeStubInterface, v5c string/*, caller string, caller_affiliation string*/) ([]byte, error) {
 	_, err := t.retrieve_v5c(stub, v5c)
 	if err == nil {
 		return []byte("false"), errors.New("V5C is not unique")
@@ -658,7 +658,7 @@ func (t *SimpleChaincode) ping(stub shim.ChaincodeStubInterface) ([]byte, error)
 func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
 
 	caller, caller_affiliation, err := t.get_caller_data(stub)
-
+    
 	if err != nil { return nil, errors.New("Error retrieving caller information")}
 
 
@@ -692,7 +692,7 @@ func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface, function stri
 //=================================================================================================================================
 func (t *SimpleChaincode) Query(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
 
-	caller, caller_affiliation, err := t.get_caller_data(stub)
+	/*caller, caller_affiliation, err := t.get_caller_data(stub)
 	if err != nil { fmt.Printf("QUERY: Error retrieving caller details", err); return nil, errors.New("QUERY: Error retrieving caller details: "+err.Error()) }
 
     logger.Debug("function: ", function)
@@ -708,6 +708,23 @@ func (t *SimpleChaincode) Query(stub shim.ChaincodeStubInterface, function strin
 		return t.check_unique_v5c(stub, args[0], caller, caller_affiliation)
 	} else if function == "get_loans" {
 		return t.get_loans(stub, caller, caller_affiliation)
+	} else if function == "get_ecert" {
+		return t.get_ecert(stub, args[0])
+	} else if function == "ping" {
+		return t.ping(stub)
+	}
+
+	return nil, errors.New("Received unknown function invocation " + function)*/
+    
+	if function == "get_loan_details" {
+		if len(args) != 1 { fmt.Printf("Incorrect number of arguments passed"); return nil, errors.New("QUERY: Incorrect number of arguments passed") }
+		v, err := t.retrieve_v5c(stub, args[0])
+		if err != nil { fmt.Printf("QUERY: Error retrieving v5c: %s", err); return nil, errors.New("QUERY: Error retrieving v5c "+err.Error()) }
+		return t.get_loan_details(stub, v)
+	} else if function == "check_unique_v5c" {
+		return t.check_unique_v5c(stub, args[0])
+	} else if function == "get_loans" {
+		return t.get_loans(stub)
 	} else if function == "get_ecert" {
 		return t.get_ecert(stub, args[0])
 	} else if function == "ping" {
