@@ -1,13 +1,28 @@
+/*
+Copyright IBM Corp 2016 All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+		 http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package main
 
 import (
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
-	"github.com/hyperledger/fabric/core/chaincode/shim"
-	"encoding/json"
+        "encoding/json"
 	"regexp"
+	"strconv"
+	"github.com/hyperledger/fabric/core/chaincode/shim"
 )
 
 var logger = shim.NewLogger("CLDChaincode")
@@ -17,23 +32,22 @@ var logger = shim.NewLogger("CLDChaincode")
 //						 user's eCert
 //==============================================================================================================================
 //CURRENT WORKAROUND USES ROLES CHANGE WHEN OWN USERS CAN BE CREATED SO THAT IT READ 1, 2, 3, 4, 5
-const   AUTHORITY      =  "regulator"
-const   MANUFACTURER   =  "manufacturer"
-const   PRIVATE_ENTITY =  "private"
-const   LEASE_COMPANY  =  "lease_company"
-const   SCRAP_MERCHANT =  "scrap_merchant"
+const   AUTHORITY          =  "regulator"
+const   BORROWER   	   =  "borrower"
+const   LEADARRANGER	   =  "leadarranger"
+const   PARTICIPATINGBANK  =  "participatingbank"
 
 
 //==============================================================================================================================
-//	 Status types - Asset lifecycle is broken down into 5 statuses, this is part of the business logic to determine what can
-//					be done to the vehicle at points in it's lifecycle
+//	 Status types - Asset lifecycle is broken down into 6 statuses, this is part of the business logic to determine what can
+//					be done to the loan at points in it's lifecycle
 //==============================================================================================================================
-const   STATE_TEMPLATE  			=  0
-const   STATE_MANUFACTURE  			=  1
-const   STATE_PRIVATE_OWNERSHIP 	=  2
-const   STATE_LEASED_OUT 			=  3
-const   STATE_BEING_SCRAPPED  		=  4
-
+const   STATE_INIT			=  0
+const   STATE_LA_ACCEPT  		=  1
+const   STATE_INVITE_PARTICIPATING_BANK	=  2
+const   STATE_PARTICIPATING_BANK_ACCEPT	=  3
+const   STATE_DISBURSED  		=  4
+const   STATE_REPAYED			=  5
 //==============================================================================================================================
 //	 Structure Definitions
 //==============================================================================================================================
@@ -47,23 +61,21 @@ type  SimpleChaincode struct {
 //	Vehicle - Defines the structure for a car object. JSON on right tells it what JSON fields to map to
 //			  that element when reading a JSON object into the struct e.g. JSON make -> Struct Make.
 //==============================================================================================================================
-type Vehicle struct {
-	Make            string `json:"make"`
-	Model           string `json:"model"`
-	Reg             string `json:"reg"`
-	VIN             int    `json:"VIN"`
-	Owner           string `json:"owner"`
-	Scrapped        bool   `json:"scrapped"`
-	Status          int    `json:"status"`
-	Colour          string `json:"colour"`
-	V5cID           string `json:"v5cID"`
-	LeaseContractID string `json:"leaseContractID"`
+type loan struct {
+	loanAmount            int `json:"loanAmount"`
+	disbursedAmount        int `json:"disbursedAmount"`
+	repayedAmount         int `json:"repayedAmount"`
+	borrower              string `json:"borrower"`
+	leadArranger          string `json:"leadArranger"`
+	participatingBank     string `json:"participatingBank"`
+	Status                int `json:"status"`
+	V5cID                 string `json:"v5cID"`
 }
 
 
 //==============================================================================================================================
-//	V5C Holder - Defines the structure that holds all the v5cIDs for vehicles that have been created.
-//				Used as an index when querying all vehicles.
+//	V5C Holder - Defines the structure that holds all the v5cIDs for contracts that have been created.
+//				Used as an index when querying all loan contracts.
 //==============================================================================================================================
 
 type V5C_Holder struct {
@@ -79,12 +91,26 @@ type User_and_eCert struct {
 	eCert string `json:"ecert"`
 }
 
-//==============================================================================================================================
-//	Init Function - Called when the user deploys the chaincode
-//==============================================================================================================================
-func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+func main() {
+	err := shim.Start(new(SimpleChaincode))
+	if err != nil {
+		fmt.Printf("Error starting Simple chaincode: %s", err)
+	}
+}
 
-	//Args
+// Init resets all the things
+func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+	/*if len(args) != 1 {
+		return nil, errors.New("Incorrect number of arguments. Expecting 1")
+	}
+
+	err := stub.PutState("hello_world", []byte(args[0]))
+	if err != nil {
+		return nil, err
+	}
+
+	return nil, nil*/
+		//Args
 	//				0
 	//			peer_address
 
@@ -92,7 +118,7 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string
 
 	bytes, err := json.Marshal(v5cIDs)
 
-    if err != nil { return nil, errors.New("Error creating V5C_Holder record") }
+        if err != nil { return nil, errors.New("Error creating V5C_Holder record") }
 
 	err = stub.PutState("v5cIDs", bytes)
 
@@ -101,21 +127,6 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string
 	}
 
 	return nil, nil
-}
-
-//==============================================================================================================================
-//	 General Functions
-//==============================================================================================================================
-//	 get_ecert - Takes the name passed and calls out to the REST API for HyperLedger to retrieve the ecert
-//				 for that user. Returns the ecert as retrived including html encoding.
-//==============================================================================================================================
-func (t *SimpleChaincode) get_ecert(stub shim.ChaincodeStubInterface, name string) ([]byte, error) {
-
-	ecert, err := stub.GetState(name)
-
-	if err != nil { return nil, errors.New("Couldn't retrieve ecert for user " + name) }
-
-	return ecert, nil
 }
 
 //==============================================================================================================================
@@ -134,6 +145,7 @@ func (t *SimpleChaincode) add_ecert(stub shim.ChaincodeStubInterface, name strin
 	return nil, nil
 
 }
+
 
 //==============================================================================================================================
 //	 get_caller - Retrieves the username of the user who invoked the chaincode.
@@ -183,12 +195,12 @@ func (t *SimpleChaincode) get_caller_data(stub shim.ChaincodeStubInterface) (str
 
 //==============================================================================================================================
 //	 retrieve_v5c - Gets the state of the data at v5cID in the ledger then converts it from the stored
-//					JSON into the Vehicle struct for use in the contract. Returns the Vehcile struct.
+//					JSON into the loan struct for use in the contract. Returns the loan struct.
 //					Returns empty v if it errors.
 //==============================================================================================================================
-func (t *SimpleChaincode) retrieve_v5c(stub shim.ChaincodeStubInterface, v5cID string) (Vehicle, error) {
+func (t *SimpleChaincode) retrieve_v5c(stub shim.ChaincodeStubInterface, v5cID string) (loan, error) {
 
-	var v Vehicle
+	var v loan
 
 	bytes, err := stub.GetState(v5cID);
 
@@ -202,162 +214,71 @@ func (t *SimpleChaincode) retrieve_v5c(stub shim.ChaincodeStubInterface, v5cID s
 }
 
 //==============================================================================================================================
-// save_changes - Writes to the ledger the Vehicle struct passed in a JSON format. Uses the shim file's
+// save_changes - Writes to the ledger the loan struct passed in a JSON format. Uses the shim file's
 //				  method 'PutState'.
 //==============================================================================================================================
-func (t *SimpleChaincode) save_changes(stub shim.ChaincodeStubInterface, v Vehicle) (bool, error) {
+func (t *SimpleChaincode) save_changes(stub shim.ChaincodeStubInterface, v loan) (bool, error) {
 
 	bytes, err := json.Marshal(v)
 
-	if err != nil { fmt.Printf("SAVE_CHANGES: Error converting vehicle record: %s", err); return false, errors.New("Error converting vehicle record") }
+	if err != nil { fmt.Printf("SAVE_CHANGES: Error converting loan record: %s", err); return false, errors.New("Error converting loan record") }
 
 	err = stub.PutState(v.V5cID, bytes)
 
-	if err != nil { fmt.Printf("SAVE_CHANGES: Error storing vehicle record: %s", err); return false, errors.New("Error storing vehicle record") }
+	if err != nil { fmt.Printf("SAVE_CHANGES: Error storing loan record: %s", err); return false, errors.New("Error storing loan record") }
 
 	return true, nil
 }
 
-//==============================================================================================================================
-//	 Router Functions
-//==============================================================================================================================
-//	Invoke - Called on chaincode invoke. Takes a function name passed and calls that function. Converts some
-//		  initial arguments passed to other things for use in the called function e.g. name -> ecert
-//==============================================================================================================================
-func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
-
-	caller, caller_affiliation, err := t.get_caller_data(stub)
-
-	if err != nil { return nil, errors.New("Error retrieving caller information")}
-
-
-	if function == "create_vehicle" {
-        return t.create_vehicle(stub, caller, caller_affiliation, args[0])
-	} else if function == "ping" {
-        return t.ping(stub)
-    } else { 																				// If the function is not a create then there must be a car so we need to retrieve the car.
-		argPos := 1
-
-		if function == "scrap_vehicle" {																// If its a scrap vehicle then only two arguments are passed (no update value) all others have three arguments and the v5cID is expected in the last argument
-			argPos = 0
-		}
-
-		v, err := t.retrieve_v5c(stub, args[argPos])
-
-        if err != nil { fmt.Printf("INVOKE: Error retrieving v5c: %s", err); return nil, errors.New("Error retrieving v5c") }
-
-
-        if strings.Contains(function, "update") == false && function != "scrap_vehicle"    { 									// If the function is not an update or a scrappage it must be a transfer so we need to get the ecert of the recipient.
-
-
-				if 		   function == "authority_to_manufacturer" { return t.authority_to_manufacturer(stub, v, caller, caller_affiliation, args[0], "manufacturer")
-				} else if  function == "manufacturer_to_private"   { return t.manufacturer_to_private(stub, v, caller, caller_affiliation, args[0], "private")
-				} else if  function == "private_to_private" 	   { return t.private_to_private(stub, v, caller, caller_affiliation, args[0], "private")
-				} else if  function == "private_to_lease_company"  { return t.private_to_lease_company(stub, v, caller, caller_affiliation, args[0], "lease_company")
-				} else if  function == "lease_company_to_private"  { return t.lease_company_to_private(stub, v, caller, caller_affiliation, args[0], "private")
-				} else if  function == "private_to_scrap_merchant" { return t.private_to_scrap_merchant(stub, v, caller, caller_affiliation, args[0], "scrap_merchant")
-				}
-
-		} else if function == "update_make"  	    { return t.update_make(stub, v, caller, caller_affiliation, args[0])
-		} else if function == "update_model"        { return t.update_model(stub, v, caller, caller_affiliation, args[0])
-		} else if function == "update_reg" { return t.update_registration(stub, v, caller, caller_affiliation, args[0])
-		} else if function == "update_vin" 			{ return t.update_vin(stub, v, caller, caller_affiliation, args[0])
-        } else if function == "update_colour" 		{ return t.update_colour(stub, v, caller, caller_affiliation, args[0])
-		} else if function == "scrap_vehicle" 		{ return t.scrap_vehicle(stub, v, caller, caller_affiliation) }
-
-		return nil, errors.New("Function of the name "+ function +" doesn't exist.")
-
-	}
-}
-//=================================================================================================================================
-//	Query - Called on chaincode query. Takes a function name passed and calls that function. Passes the
-//  		initial arguments passed are passed on to the called function.
-//=================================================================================================================================
-func (t *SimpleChaincode) Query(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
-
-	caller, caller_affiliation, err := t.get_caller_data(stub)
-	if err != nil { fmt.Printf("QUERY: Error retrieving caller details", err); return nil, errors.New("QUERY: Error retrieving caller details: "+err.Error()) }
-
-    logger.Debug("function: ", function)
-    logger.Debug("caller: ", caller)
-    logger.Debug("affiliation: ", caller_affiliation)
-
-	if function == "get_vehicle_details" {
-		if len(args) != 1 { fmt.Printf("Incorrect number of arguments passed"); return nil, errors.New("QUERY: Incorrect number of arguments passed") }
-		v, err := t.retrieve_v5c(stub, args[0])
-		if err != nil { fmt.Printf("QUERY: Error retrieving v5c: %s", err); return nil, errors.New("QUERY: Error retrieving v5c "+err.Error()) }
-		return t.get_vehicle_details(stub, v, caller, caller_affiliation)
-	} else if function == "check_unique_v5c" {
-		return t.check_unique_v5c(stub, args[0], caller, caller_affiliation)
-	} else if function == "get_vehicles" {
-		return t.get_vehicles(stub, caller, caller_affiliation)
-	} else if function == "get_ecert" {
-		return t.get_ecert(stub, args[0])
-	} else if function == "ping" {
-		return t.ping(stub)
-	}
-
-	return nil, errors.New("Received unknown function invocation " + function)
-
-}
-
-//=================================================================================================================================
-//	 Ping Function
-//=================================================================================================================================
-//	 Pings the peer to keep the connection alive
-//=================================================================================================================================
-func (t *SimpleChaincode) ping(stub shim.ChaincodeStubInterface) ([]byte, error) {
-	return []byte("Hello, world!"), nil
-}
 
 //=================================================================================================================================
 //	 Create Function
 //=================================================================================================================================
 //	 Create Vehicle - Creates the initial JSON for the vehcile and then saves it to the ledger.
 //=================================================================================================================================
-func (t *SimpleChaincode) create_vehicle(stub shim.ChaincodeStubInterface, caller string, caller_affiliation string, v5cID string) ([]byte, error) {
-	var v Vehicle
+func (t *SimpleChaincode) create_loan(stub shim.ChaincodeStubInterface, caller string, caller_affiliation string, v5cID string) ([]byte, error) {
+	var v loan
+	//var v5c_ID string
+	//var borrower_ string
+	
+	V5c_ID             := "\"v5cID\":\""+v5cID+"\", "							// Variables to define the JSON
+	loanAmount         := "\"loanAmount\":\"UNDEFINED\", "
+	disbursedAmoun     := "\"disbursedAmoun\":\"UNDEFINED\", "
+	repayedAmount      := "\"repayedAmount\":\"UNDEFINED\", "
+	borrower_          := "\"borrower\":\""+caller+"\", "
+	leadArranger   	   := "\"leadArranger\":\"UNDEFINED\", "
+	participatingBank  := "\"participatingBank\":\"UNDEFINED\", "
+	Status             := "\"Status\":0, "
+        	
+	loan_json := "{"+V5c_ID+loanAmount+disbursedAmoun+repayedAmount+borrower_+leadArranger+participatingBank+Status+"}" 	// Concatenates the variables to create the total JSON object
 
-	v5c_ID         := "\"v5cID\":\""+v5cID+"\", "							// Variables to define the JSON
-	vin            := "\"VIN\":0, "
-	make           := "\"Make\":\"UNDEFINED\", "
-	model          := "\"Model\":\"UNDEFINED\", "
-	reg            := "\"Reg\":\"UNDEFINED\", "
-	owner          := "\"Owner\":\""+caller+"\", "
-	colour         := "\"Colour\":\"UNDEFINED\", "
-	leaseContract  := "\"LeaseContractID\":\"UNDEFINED\", "
-	status         := "\"Status\":0, "
-	scrapped       := "\"Scrapped\":false"
+	matched, err := regexp.Match("^[0-9]+", []byte(v5cID))  				// matched = true if the v5cID passed fits format of two letters followed by seven digits
 
-	vehicle_json := "{"+v5c_ID+vin+make+model+reg+owner+colour+leaseContract+status+scrapped+"}" 	// Concatenates the variables to create the total JSON object
+												if err != nil { fmt.Printf("CREATE_LOAN: Invalid v5cID: %s", err); return nil, errors.New("Invalid v5cID") }
 
-	matched, err := regexp.Match("^[A-z][A-z][0-9]{7}", []byte(v5cID))  				// matched = true if the v5cID passed fits format of two letters followed by seven digits
-
-												if err != nil { fmt.Printf("CREATE_VEHICLE: Invalid v5cID: %s", err); return nil, errors.New("Invalid v5cID") }
-
-	if 				v5c_ID  == "" 	 ||
+	if 				V5c_ID  == "" 	 ||
 					matched == false    {
-																		fmt.Printf("CREATE_VEHICLE: Invalid v5cID provided");
+																		fmt.Printf("CREATE_LOAN: Invalid v5cID provided");
 																		return nil, errors.New("Invalid v5cID provided")
 	}
 
-	err = json.Unmarshal([]byte(vehicle_json), &v)							// Convert the JSON defined above into a vehicle object for go
+	err = json.Unmarshal([]byte(loan_json), &v)							// Convert the JSON defined above into a vehicle object for go
 
 																		if err != nil { return nil, errors.New("Invalid JSON object") }
 
 	record, err := stub.GetState(v.V5cID) 								// If not an error then a record exists so cant create a new car with this V5cID as it must be unique
 
-																		if record != nil { return nil, errors.New("Vehicle already exists") }
+																		if record != nil { return nil, errors.New("Loan already exists") }
 
-	if 	caller_affiliation != AUTHORITY {							// Only the regulator can create a new v5c
+	/*if 	caller_affiliation != AUTHORITY {							// Only the regulator can create a new v5c
 
-		return nil, errors.New(fmt.Sprintf("Permission Denied. create_vehicle. %v === %v", caller_affiliation, AUTHORITY))
+		return nil, errors.New(fmt.Sprintf("Permission Denied. create_loan. %v === %v", caller_affiliation, AUTHORITY))
 
-	}
+	}*/
 
 	_, err  = t.save_changes(stub, v)
 
-																		if err != nil { fmt.Printf("CREATE_VEHICLE: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
+																		if err != nil { fmt.Printf("CREATE_LOAN: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
 
 	bytes, err := stub.GetState("v5cIDs")
 
@@ -374,177 +295,11 @@ func (t *SimpleChaincode) create_vehicle(stub shim.ChaincodeStubInterface, calle
 
 	bytes, err = json.Marshal(v5cIDs)
 
-															if err != nil { fmt.Print("Error creating V5C_Holder record") }
+			if err != nil { fmt.Print("Error creating V5C_Holder record") }
 
 	err = stub.PutState("v5cIDs", bytes)
 
-															if err != nil { return nil, errors.New("Unable to put the state") }
-
-	return nil, nil
-
-}
-
-//=================================================================================================================================
-//	 Transfer Functions
-//=================================================================================================================================
-//	 authority_to_manufacturer
-//=================================================================================================================================
-func (t *SimpleChaincode) authority_to_manufacturer(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string, recipient_name string, recipient_affiliation string) ([]byte, error) {
-
-	if     	v.Status				== STATE_TEMPLATE	&&
-			v.Owner					== caller			&&
-			caller_affiliation		== AUTHORITY		&&
-			recipient_affiliation	== MANUFACTURER		&&
-			v.Scrapped				== false			{		// If the roles and users are ok
-
-					v.Owner  = recipient_name		// then make the owner the new owner
-					v.Status = STATE_MANUFACTURE			// and mark it in the state of manufacture
-
-	} else {									// Otherwise if there is an error
-															fmt.Printf("AUTHORITY_TO_MANUFACTURER: Permission Denied");
-                                                            return nil, errors.New(fmt.Sprintf("Permission Denied. authority_to_manufacturer. %v %v === %v, %v === %v, %v === %v, %v === %v, %v === %v", v, v.Status, STATE_PRIVATE_OWNERSHIP, v.Owner, caller, caller_affiliation, PRIVATE_ENTITY, recipient_affiliation, SCRAP_MERCHANT, v.Scrapped, false))
-
-
-	}
-
-	_, err := t.save_changes(stub, v)						// Write new state
-
-															if err != nil {	fmt.Printf("AUTHORITY_TO_MANUFACTURER: Error saving changes: %s", err); return nil, errors.New("Error saving changes")	}
-
-	return nil, nil									// We are Done
-
-}
-
-//=================================================================================================================================
-//	 manufacturer_to_private
-//=================================================================================================================================
-func (t *SimpleChaincode) manufacturer_to_private(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string, recipient_name string, recipient_affiliation string) ([]byte, error) {
-
-	if 		v.Make 	 == "UNDEFINED" ||
-			v.Model  == "UNDEFINED" ||
-			v.Reg 	 == "UNDEFINED" ||
-			v.Colour == "UNDEFINED" ||
-			v.VIN == 0				{					//If any part of the car is undefined it has not bene fully manufacturered so cannot be sent
-															fmt.Printf("MANUFACTURER_TO_PRIVATE: Car not fully defined")
-															return nil, errors.New(fmt.Sprintf("Car not fully defined. %v", v))
-	}
-
-	if 		v.Status				== STATE_MANUFACTURE	&&
-			v.Owner					== caller				&&
-			caller_affiliation		== MANUFACTURER			&&
-			recipient_affiliation	== PRIVATE_ENTITY		&&
-			v.Scrapped     == false							{
-
-					v.Owner = recipient_name
-					v.Status = STATE_PRIVATE_OWNERSHIP
-
-	} else {
-        return nil, errors.New(fmt.Sprintf("Permission Denied. manufacturer_to_private. %v %v === %v, %v === %v, %v === %v, %v === %v, %v === %v", v, v.Status, STATE_PRIVATE_OWNERSHIP, v.Owner, caller, caller_affiliation, PRIVATE_ENTITY, recipient_affiliation, SCRAP_MERCHANT, v.Scrapped, false))
-    }
-
-	_, err := t.save_changes(stub, v)
-
-	if err != nil { fmt.Printf("MANUFACTURER_TO_PRIVATE: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
-
-	return nil, nil
-
-}
-
-//=================================================================================================================================
-//	 private_to_private
-//=================================================================================================================================
-func (t *SimpleChaincode) private_to_private(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string, recipient_name string, recipient_affiliation string) ([]byte, error) {
-
-	if 		v.Status				== STATE_PRIVATE_OWNERSHIP	&&
-			v.Owner					== caller					&&
-			caller_affiliation		== PRIVATE_ENTITY			&&
-			recipient_affiliation	== PRIVATE_ENTITY			&&
-			v.Scrapped				== false					{
-
-					v.Owner = recipient_name
-
-	} else {
-        return nil, errors.New(fmt.Sprintf("Permission Denied. private_to_private. %v %v === %v, %v === %v, %v === %v, %v === %v, %v === %v", v, v.Status, STATE_PRIVATE_OWNERSHIP, v.Owner, caller, caller_affiliation, PRIVATE_ENTITY, recipient_affiliation, SCRAP_MERCHANT, v.Scrapped, false))
-	}
-
-	_, err := t.save_changes(stub, v)
-
-															if err != nil { fmt.Printf("PRIVATE_TO_PRIVATE: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
-
-	return nil, nil
-
-}
-
-//=================================================================================================================================
-//	 private_to_lease_company
-//=================================================================================================================================
-func (t *SimpleChaincode) private_to_lease_company(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string, recipient_name string, recipient_affiliation string) ([]byte, error) {
-
-	if 		v.Status				== STATE_PRIVATE_OWNERSHIP	&&
-			v.Owner					== caller					&&
-			caller_affiliation		== PRIVATE_ENTITY			&&
-			recipient_affiliation	== LEASE_COMPANY			&&
-            v.Scrapped     			== false					{
-
-					v.Owner = recipient_name
-
-	} else {
-        return nil, errors.New(fmt.Sprintf("Permission denied. private_to_lease_company. %v === %v, %v === %v, %v === %v, %v === %v, %v === %v", v.Status, STATE_PRIVATE_OWNERSHIP, v.Owner, caller, caller_affiliation, PRIVATE_ENTITY, recipient_affiliation, SCRAP_MERCHANT, v.Scrapped, false))
-
-	}
-
-	_, err := t.save_changes(stub, v)
-															if err != nil { fmt.Printf("PRIVATE_TO_LEASE_COMPANY: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
-
-	return nil, nil
-
-}
-
-//=================================================================================================================================
-//	 lease_company_to_private
-//=================================================================================================================================
-func (t *SimpleChaincode) lease_company_to_private(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string, recipient_name string, recipient_affiliation string) ([]byte, error) {
-
-	if		v.Status				== STATE_PRIVATE_OWNERSHIP	&&
-			v.Owner  				== caller					&&
-			caller_affiliation		== LEASE_COMPANY			&&
-			recipient_affiliation	== PRIVATE_ENTITY			&&
-			v.Scrapped				== false					{
-
-				v.Owner = recipient_name
-
-	} else {
-		return nil, errors.New(fmt.Sprintf("Permission Denied. lease_company_to_private. %v %v === %v, %v === %v, %v === %v, %v === %v, %v === %v", v, v.Status, STATE_PRIVATE_OWNERSHIP, v.Owner, caller, caller_affiliation, PRIVATE_ENTITY, recipient_affiliation, SCRAP_MERCHANT, v.Scrapped, false))
-	}
-
-	_, err := t.save_changes(stub, v)
-															if err != nil { fmt.Printf("LEASE_COMPANY_TO_PRIVATE: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
-
-	return nil, nil
-
-}
-
-//=================================================================================================================================
-//	 private_to_scrap_merchant
-//=================================================================================================================================
-func (t *SimpleChaincode) private_to_scrap_merchant(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string, recipient_name string, recipient_affiliation string) ([]byte, error) {
-
-	if		v.Status				== STATE_PRIVATE_OWNERSHIP	&&
-			v.Owner					== caller					&&
-			caller_affiliation		== PRIVATE_ENTITY			&&
-			recipient_affiliation	== SCRAP_MERCHANT			&&
-			v.Scrapped				== false					{
-
-					v.Owner = recipient_name
-					v.Status = STATE_BEING_SCRAPPED
-
-	} else {
-        return nil, errors.New(fmt.Sprintf("Permission Denied. private_to_scrap_merchant. %v %v === %v, %v === %v, %v === %v, %v === %v, %v === %v", v, v.Status, STATE_PRIVATE_OWNERSHIP, v.Owner, caller, caller_affiliation, PRIVATE_ENTITY, recipient_affiliation, SCRAP_MERCHANT, v.Scrapped, false))
-	}
-
-	_, err := t.save_changes(stub, v)
-
-															if err != nil { fmt.Printf("PRIVATE_TO_SCRAP_MERCHANT: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
+		if err != nil { return nil, errors.New("Unable to put the state") }
 
 	return nil, nil
 
@@ -553,30 +308,99 @@ func (t *SimpleChaincode) private_to_scrap_merchant(stub shim.ChaincodeStubInter
 //=================================================================================================================================
 //	 Update Functions
 //=================================================================================================================================
-//	 update_vin
+//	 update_status
 //=================================================================================================================================
-func (t *SimpleChaincode) update_vin(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string, new_value string) ([]byte, error) {
+func (t *SimpleChaincode) update_status(stub shim.ChaincodeStubInterface, v loan, caller string, caller_affiliation string, status string) ([]byte, error) {
+        var err error
+	
+	new_status, err := strconv.Atoi(string(status)) // will return an error if the new vin contains non numerical chars
 
-	new_vin, err := strconv.Atoi(string(new_value)) 		                // will return an error if the new vin contains non numerical chars
+	if err != nil{ return nil, errors.New("Invalid value passed for status") }
+	/*Update state only when hese conditions are met
+	if (v.State == STATE_INIT && caller == LEADARRANGER) ||
+	(v.State == STATE_LA_ACCEPT && caller == LEADARRANGER) ||
+	(v.State == STATE_INVITE_PARTICIPATING_BANK && caller == PARTICIPATINGBANK) || 
+	(v.State == STATE_PARTICIPATING_BANK_ACCEPT && (caller == PARTICIPATINGBANK || caller == LEADARRANGER)) ||
+	(v.State == STATE_DISBURSED && caller == BORROWER) ||
+	{*/
+        v.Status = new_status				// Update to the new value
+	//}
+	_, err  = t.save_changes(stub, v)		// Save the changes in the blockchain
 
-															if err != nil || len(string(new_value)) != 15 { return nil, errors.New("Invalid value passed for new VIN") }
+	if err != nil { fmt.Printf("UPDATE_STATUS: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
 
-	if 		v.Status			== STATE_MANUFACTURE	&&
-			v.Owner				== caller				&&
-			caller_affiliation	== MANUFACTURER			&&
-			v.VIN				== 0					&&			// Can't change the VIN after its initial assignment
-			v.Scrapped			== false				{
+	return nil, nil
 
-					v.VIN = new_vin					// Update to the new value
-	} else {
+}
 
-        return nil, errors.New(fmt.Sprintf("Permission denied. update_vin %v %v %v %v %v", v.Status, STATE_MANUFACTURE, v.Owner, caller, v.VIN, v.Scrapped))
+//=================================================================================================================================
+//	 update_borrower
+//=================================================================================================================================
+func (t *SimpleChaincode) update_borrower(stub shim.ChaincodeStubInterface, v loan, caller string, caller_affiliation string, borrower string) ([]byte, error) {
+        var err error
+	/*Update state only when hese conditions are met
+	if (v.State == STATE_INIT && caller == LEADARRANGER) ||
+	(v.State == STATE_LA_ACCEPT && caller == LEADARRANGER) ||
+	(v.State == STATE_INVITE_PARTICIPATING_BANK && caller == PARTICIPATINGBANK) || 
+	(v.State == STATE_PARTICIPATING_BANK_ACCEPT && (caller == PARTICIPATINGBANK || caller == LEADARRANGER)) ||
+	(v.State == STATE_DISBURSED && caller == BORROWER) ||
+	{*/
+	//TODO: Borrower should not be updated everytime
+        v.borrower = borrower			// Update to the new value
+	//}
+	_, err  = t.save_changes(stub, v)		// Save the changes in the blockchain
 
-	}
+	if err != nil { fmt.Printf("UPDATE_STATUS: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
 
-	_, err  = t.save_changes(stub, v)						// Save the changes in the blockchain
+	return nil, nil
 
-															if err != nil { fmt.Printf("UPDATE_VIN: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
+}
+
+//=================================================================================================================================
+//	 update_leadarranger
+//=================================================================================================================================
+func (t *SimpleChaincode) update_leadarranger(stub shim.ChaincodeStubInterface, v loan, caller string, caller_affiliation string, arranger string) ([]byte, error) {
+        var err error
+	/*Update state only when hese conditions are met
+	if (v.State == STATE_INIT && caller == LEADARRANGER) ||
+	(v.State == STATE_LA_ACCEPT && caller == LEADARRANGER) ||
+	(v.State == STATE_INVITE_PARTICIPATING_BANK && caller == PARTICIPATINGBANK) || 
+	(v.State == STATE_PARTICIPATING_BANK_ACCEPT && (caller == PARTICIPATINGBANK || caller == LEADARRANGER)) ||
+	(v.State == STATE_DISBURSED && caller == BORROWER) ||
+	{*/
+	//TODO: arranger should not be updated everytime
+        v.leadArranger = arranger			// Update to the new value
+	//}
+	_, err  = t.save_changes(stub, v)		// Save the changes in the blockchain
+
+	if err != nil { fmt.Printf("UPDATE_STATUS: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
+
+	return nil, nil
+
+}
+
+//=================================================================================================================================
+//	 update_loanamount
+//=================================================================================================================================
+func (t *SimpleChaincode) update_loanAmount(stub shim.ChaincodeStubInterface, v loan, caller string, caller_affiliation string, amount string) ([]byte, error) {
+        var err error
+	
+	new_amount, err := strconv.Atoi(string(amount)) // will return an error if the new vin contains non numerical chars
+
+	if err != nil{ return nil, errors.New("Invalid value passed for loan amount") }
+	/*Update state only when hese conditions are met
+	if (v.State == STATE_INIT && caller == LEADARRANGER) ||
+	(v.State == STATE_LA_ACCEPT && caller == LEADARRANGER) ||
+	(v.State == STATE_INVITE_PARTICIPATING_BANK && caller == PARTICIPATINGBANK) || 
+	(v.State == STATE_PARTICIPATING_BANK_ACCEPT && (caller == PARTICIPATINGBANK || caller == LEADARRANGER)) ||
+	(v.State == STATE_DISBURSED && caller == BORROWER) ||
+	{*/
+	//TODO: loanAmount should not be updated everytime
+        v.loanAmount = new_amount			// Update to the new value
+	//}
+	_, err  = t.save_changes(stub, v)		// Save the changes in the blockchain
+
+	if err != nil { fmt.Printf("UPDATE_STATUS: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
 
 	return nil, nil
 
@@ -584,124 +408,76 @@ func (t *SimpleChaincode) update_vin(stub shim.ChaincodeStubInterface, v Vehicle
 
 
 //=================================================================================================================================
-//	 update_registration
+//	 update_disbursedAmount
 //=================================================================================================================================
-func (t *SimpleChaincode) update_registration(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string, new_value string) ([]byte, error) {
+func (t *SimpleChaincode) update_disbursedAmount(stub shim.ChaincodeStubInterface, v loan, caller string, caller_affiliation string, amount string) ([]byte, error) {
+        var err error
+	
+	new_amount, err := strconv.Atoi(string(amount)) // will return an error if the new vin contains non numerical chars
 
+	if err != nil{ return nil, errors.New("Invalid value passed for disbursed amount") }
 
-	if		v.Owner				== caller			&&
-			caller_affiliation	!= SCRAP_MERCHANT	&&
-			v.Scrapped			== false			{
+	/*Update state only when hese conditions are met
+	if (v.State == STATE_INIT && caller == LEADARRANGER) ||
+	(v.State == STATE_LA_ACCEPT && caller == LEADARRANGER) ||
+	(v.State == STATE_INVITE_PARTICIPATING_BANK && caller == PARTICIPATINGBANK) || 
+	(v.State == STATE_PARTICIPATING_BANK_ACCEPT && (caller == PARTICIPATINGBANK || caller == LEADARRANGER)) ||
+	(v.State == STATE_DISBURSED && caller == BORROWER) ||
+	{*/
+        v.disbursedAmount = new_amount				// Update to the new value
+	//}
+	_, err  = t.save_changes(stub, v)		// Save the changes in the blockchain
 
-					v.Reg = new_value
-
-	} else {
-        return nil, errors.New(fmt.Sprint("Permission denied. update_registration"))
-	}
-
-	_, err := t.save_changes(stub, v)
-
-															if err != nil { fmt.Printf("UPDATE_REGISTRATION: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
+	if err != nil { fmt.Printf("UPDATE_DISBURSEDAMOUNT: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
 
 	return nil, nil
 
 }
 
 //=================================================================================================================================
-//	 update_colour
+//	 update_repayedAmount
 //=================================================================================================================================
-func (t *SimpleChaincode) update_colour(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string, new_value string) ([]byte, error) {
+func (t *SimpleChaincode) update_repayedAmount(stub shim.ChaincodeStubInterface, v loan, caller string, caller_affiliation string, amount string) ([]byte, error) {
+        var err error
+	
+	new_amount, err := strconv.Atoi(string(amount)) // will return an error if the new vin contains non numerical chars
 
-	if 		v.Owner				== caller				&&
-			caller_affiliation	== MANUFACTURER			&&/*((v.Owner				== caller			&&
-			caller_affiliation	== MANUFACTURER)		||
-			caller_affiliation	== AUTHORITY)			&&*/
-			v.Scrapped			== false				{
+	if err != nil{ return nil, errors.New("Invalid value passed for repayed amount") }	
+	
+	/*Update state only when hese conditions are met
+	if (v.State == STATE_INIT && caller == LEADARRANGER) ||
+	(v.State == STATE_LA_ACCEPT && caller == LEADARRANGER) ||
+	(v.State == STATE_INVITE_PARTICIPATING_BANK && caller == PARTICIPATINGBANK) || 
+	(v.State == STATE_PARTICIPATING_BANK_ACCEPT && (caller == PARTICIPATINGBANK || caller == LEADARRANGER)) ||
+	(v.State == STATE_DISBURSED && caller == BORROWER) ||
+	{*/
+        v.repayedAmount = new_amount				// Update to the new value
+	//}
+	_, err  = t.save_changes(stub, v)		// Save the changes in the blockchain
 
-					v.Colour = new_value
-	} else {
-
-		return nil, errors.New(fmt.Sprint("Permission denied. update_colour %t %t %t" + v.Owner == caller, caller_affiliation == MANUFACTURER, v.Scrapped))
-	}
-
-	_, err := t.save_changes(stub, v)
-
-		if err != nil { fmt.Printf("UPDATE_COLOUR: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
+	if err != nil { fmt.Printf("UPDATE_REPAYEDAMOUNT: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
 
 	return nil, nil
 
 }
 
 //=================================================================================================================================
-//	 update_make
+//	 update_participatingBank
 //=================================================================================================================================
-func (t *SimpleChaincode) update_make(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string, new_value string) ([]byte, error) {
+func (t *SimpleChaincode) update_participatingBank(stub shim.ChaincodeStubInterface, v loan, caller string, caller_affiliation string, new_bank string) ([]byte, error) {
+        var err error
+	/*Update state only when hese conditions are met
+	if (v.State == STATE_INIT && caller == LEADARRANGER) ||
+	(v.State == STATE_LA_ACCEPT && caller == LEADARRANGER) ||
+	(v.State == STATE_INVITE_PARTICIPATING_BANK && caller == PARTICIPATINGBANK) || 
+	(v.State == STATE_PARTICIPATING_BANK_ACCEPT && (caller == PARTICIPATINGBANK || caller == LEADARRANGER)) ||
+	(v.State == STATE_DISBURSED && caller == BORROWER) ||
+	{*/
+        v.participatingBank = new_bank				// Update to the new value
+	//}
+	_, err  = t.save_changes(stub, v)		// Save the changes in the blockchain
 
-	if 		v.Status			== STATE_MANUFACTURE	&&
-			v.Owner				== caller				&&
-			caller_affiliation	== MANUFACTURER			&&
-			v.Scrapped			== false				{
-
-					v.Make = new_value
-	} else {
-
-        return nil, errors.New(fmt.Sprint("Permission denied. update_make %t %t %t" + v.Owner == caller, caller_affiliation == MANUFACTURER, v.Scrapped))
-
-
-	}
-
-	_, err := t.save_changes(stub, v)
-
-															if err != nil { fmt.Printf("UPDATE_MAKE: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
-
-	return nil, nil
-
-}
-
-//=================================================================================================================================
-//	 update_model
-//=================================================================================================================================
-func (t *SimpleChaincode) update_model(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string, new_value string) ([]byte, error) {
-
-	if 		v.Status			== STATE_MANUFACTURE	&&
-			v.Owner				== caller				&&
-			caller_affiliation	== MANUFACTURER			&&
-			v.Scrapped			== false				{
-
-					v.Model = new_value
-
-	} else {
-        return nil, errors.New(fmt.Sprint("Permission denied. update_model %t %t %t" + v.Owner == caller, caller_affiliation == MANUFACTURER, v.Scrapped))
-
-	}
-
-	_, err := t.save_changes(stub, v)
-
-															if err != nil { fmt.Printf("UPDATE_MODEL: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
-
-	return nil, nil
-
-}
-
-//=================================================================================================================================
-//	 scrap_vehicle
-//=================================================================================================================================
-func (t *SimpleChaincode) scrap_vehicle(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string) ([]byte, error) {
-
-	if		v.Status			== STATE_BEING_SCRAPPED	&&
-			v.Owner				== caller				&&
-			caller_affiliation	== SCRAP_MERCHANT		&&
-			v.Scrapped			== false				{
-
-					v.Scrapped = true
-
-	} else {
-		return nil, errors.New("Permission denied. scrap_vehicle")
-	}
-
-	_, err := t.save_changes(stub, v)
-
-															if err != nil { fmt.Printf("SCRAP_VEHICLE: Error saving changes: %s", err); return nil, errors.New("SCRAP_VEHICLError saving changes") }
+	if err != nil { fmt.Printf("UPDATE_REPAYEDAMOUNT: Error saving changes: %s", err); return nil, errors.New("Error saving changes") }
 
 	return nil, nil
 
@@ -710,29 +486,30 @@ func (t *SimpleChaincode) scrap_vehicle(stub shim.ChaincodeStubInterface, v Vehi
 //=================================================================================================================================
 //	 Read Functions
 //=================================================================================================================================
-//	 get_vehicle_details
+//	 get_loan_details
 //=================================================================================================================================
-func (t *SimpleChaincode) get_vehicle_details(stub shim.ChaincodeStubInterface, v Vehicle, caller string, caller_affiliation string) ([]byte, error) {
+func (t *SimpleChaincode) get_loan_details(stub shim.ChaincodeStubInterface, v loan, caller string, caller_affiliation string) ([]byte, error) {
 
 	bytes, err := json.Marshal(v)
 
 																if err != nil { return nil, errors.New("GET_VEHICLE_DETAILS: Invalid vehicle object") }
 
-	if 		v.Owner				== caller		||
-			caller_affiliation	== AUTHORITY	{
+	/*if caller_affiliation	== BORROWER ||
+	caller_affiliation	== LEADARRANGER ||
+	caller_affiliation	== PARTICIPATINGBANK{*/
 
-					return bytes, nil
-	} else {
+	return bytes, nil
+	/*} else {
 																return nil, errors.New("Permission Denied. get_vehicle_details")
-	}
+	}*/
 
 }
 
 //=================================================================================================================================
-//	 get_vehicles
+//	 get_loans
 //=================================================================================================================================
 
-func (t *SimpleChaincode) get_vehicles(stub shim.ChaincodeStubInterface, caller string, caller_affiliation string) ([]byte, error) {
+func (t *SimpleChaincode) get_loans(stub shim.ChaincodeStubInterface, caller string, caller_affiliation string) ([]byte, error) {
 	bytes, err := stub.GetState("v5cIDs")
 
 																			if err != nil { return nil, errors.New("Unable to get v5cIDs") }
@@ -746,7 +523,7 @@ func (t *SimpleChaincode) get_vehicles(stub shim.ChaincodeStubInterface, caller 
 	result := "["
 
 	var temp []byte
-	var v Vehicle
+	var v loan
 
 	for _, v5c := range v5cIDs.V5Cs {
 
@@ -754,7 +531,7 @@ func (t *SimpleChaincode) get_vehicles(stub shim.ChaincodeStubInterface, caller 
 
 		if err != nil {return nil, errors.New("Failed to retrieve V5C")}
 
-		temp, err = t.get_vehicle_details(stub, v, caller, caller_affiliation)
+		temp, err = t.get_loan_details(stub, v, caller, caller_affiliation)
 
 		if err == nil {
 			result += string(temp) + ","
@@ -769,6 +546,18 @@ func (t *SimpleChaincode) get_vehicles(stub shim.ChaincodeStubInterface, caller 
 
 	return []byte(result), nil
 }
+//==============================================================================================================================
+//	 get_ecert - Takes the name passed and calls out to the REST API for HyperLedger to retrieve the ecert
+//				 for that user. Returns the ecert as retrived including html encoding.
+//==============================================================================================================================
+func (t *SimpleChaincode) get_ecert(stub shim.ChaincodeStubInterface, name string) ([]byte, error) {
+
+	ecert, err := stub.GetState(name)
+
+	if err != nil { return nil, errors.New("Couldn't retrieve ecert for user " + name) }
+
+	return ecert, nil
+}
 
 //=================================================================================================================================
 //	 check_unique_v5c
@@ -782,12 +571,150 @@ func (t *SimpleChaincode) check_unique_v5c(stub shim.ChaincodeStubInterface, v5c
 	}
 }
 
-//=================================================================================================================================
-//	 Main - main - Starts up the chaincode
-//=================================================================================================================================
-func main() {
+/*
+// Invoke issuer entry point to invoke a chaincode function
+func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+	fmt.Println("invoke is running " + function)
 
-	err := shim.Start(new(SimpleChaincode))
+	// Handle different functions
+	if function == "init" {
+		return t.Init(stub, "init", args)
+	} else if function == "write" {
+		return t.write(stub, args)
+	}
+	fmt.Println("invoke did not find func: " + function)
 
-															if err != nil { fmt.Printf("Error starting Chaincode: %s", err) }
+	return nil, errors.New("Received unknown function invocation: " + function)
 }
+
+// Query is our entry point for queries
+func (t *SimpleChaincode) Query(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+	fmt.Println("query is running " + function)
+
+	// Handle different functions
+	if function == "read" { //read a variable
+		return t.read(stub, args)
+	}
+	fmt.Println("query did not find func: " + function)
+
+	return nil, errors.New("Received unknown function query: " + function)
+}
+
+// write - invoke function to write key/value pair
+func (t *SimpleChaincode) write(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
+	var key, value string
+	var err error
+	fmt.Println("running write()")
+
+	if len(args) != 2 {
+		return nil, errors.New("Incorrect number of arguments. Expecting 2. name of the key and value to set")
+	}
+
+	key = args[0] //rename for funsies
+	value = args[1]
+	err = stub.PutState(key, []byte(value)) //write the variable into the chaincode state
+	if err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// read - query function to read key/value pair
+func (t *SimpleChaincode) read(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
+	var key, jsonResp string
+	var err error
+
+	if len(args) != 1 {
+		return nil, errors.New("Incorrect number of arguments. Expecting name of the key to query")
+	}
+
+	key = args[0]
+	valAsbytes, err := stub.GetState(key)
+	if err != nil {
+		jsonResp = "{\"Error\":\"Failed to get state for " + key + "\"}"
+		return nil, errors.New(jsonResp)
+	}
+        
+	//var newByte = []byte("Test change....")
+	return valAsbytes, nil
+}
+*/
+
+//=================================================================================================================================
+//	 Ping Function
+//=================================================================================================================================
+//	 Pings the peer to keep the connection alive
+//=================================================================================================================================
+func (t *SimpleChaincode) ping(stub shim.ChaincodeStubInterface) ([]byte, error) {
+	return []byte("Hello, world!"), nil
+}
+
+//==============================================================================================================================
+//	 Router Functions
+//==============================================================================================================================
+//	Invoke - Called on chaincode invoke. Takes a function name passed and calls that function. Converts some
+//		  initial arguments passed to other things for use in the called function e.g. name -> ecert
+//==============================================================================================================================
+func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+
+	caller, caller_affiliation, err := t.get_caller_data(stub)
+
+	if err != nil { return nil, errors.New("Error retrieving caller information")}
+
+
+	if function == "create_loan" {
+        return t.create_loan(stub, caller, caller_affiliation, args[0])
+	} else if function == "ping" {
+        return t.ping(stub)
+    	} else { 																				// If the function is not a create then there must be a car so we need to retrieve the car.
+		argPos := 1
+
+		v, err := t.retrieve_v5c(stub, args[argPos])
+
+        if err != nil { fmt.Printf("INVOKE: Error retrieving v5c: %s", err); return nil, errors.New("Error retrieving v5c") 
+
+
+
+		} else if function == "update_status"  	    { return t.update_status(stub, v, caller, caller_affiliation, args[0])
+		} else if function == "update_loanAmount"        { return t.update_loanAmount(stub, v, caller, caller_affiliation, args[0])
+		} else if function == "update_borrower" { return t.update_borrower(stub, v, caller, caller_affiliation, args[0])
+		} else if function == "update_disbursedAmount" 			{ return t.update_disbursedAmount(stub, v, caller, caller_affiliation, args[0])
+        	} else if function == "update_repayedAmount" 		{ return t.update_repayedAmount(stub, v, caller, caller_affiliation, args[0])
+		}
+		return nil, errors.New("Function of the name "+ function +" doesn't exist.")
+
+	}
+}
+
+//=================================================================================================================================
+//	Query - Called on chaincode query. Takes a function name passed and calls that function. Passes the
+//  		initial arguments passed are passed on to the called function.
+//=================================================================================================================================
+func (t *SimpleChaincode) Query(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+
+	caller, caller_affiliation, err := t.get_caller_data(stub)
+	if err != nil { fmt.Printf("QUERY: Error retrieving caller details", err); return nil, errors.New("QUERY: Error retrieving caller details: "+err.Error()) }
+
+    logger.Debug("function: ", function)
+    logger.Debug("caller: ", caller)
+    logger.Debug("affiliation: ", caller_affiliation)
+
+	if function == "get_loan_details" {
+		if len(args) != 1 { fmt.Printf("Incorrect number of arguments passed"); return nil, errors.New("QUERY: Incorrect number of arguments passed") }
+		v, err := t.retrieve_v5c(stub, args[0])
+		if err != nil { fmt.Printf("QUERY: Error retrieving v5c: %s", err); return nil, errors.New("QUERY: Error retrieving v5c "+err.Error()) }
+		return t.get_loan_details(stub, v, caller, caller_affiliation)
+	} else if function == "check_unique_v5c" {
+		return t.check_unique_v5c(stub, args[0], caller, caller_affiliation)
+	} else if function == "get_loans" {
+		return t.get_loans(stub, caller, caller_affiliation)
+	} else if function == "get_ecert" {
+		return t.get_ecert(stub, args[0])
+	} else if function == "ping" {
+		return t.ping(stub)
+	}
+
+	return nil, errors.New("Received unknown function invocation " + function)
+
+}
+
